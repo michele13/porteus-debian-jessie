@@ -1,0 +1,149 @@
+#!/bin/bash
+#set -x
+[ "`whoami`" != "root" ] && exec gsu ${0} "$@"
+
+LFONT="<span size='large' foreground='dark blue'><b>          *** Setup apt2sfs ***</b></span>"
+devs="$(blkid -o list | grep /dev | grep -E -v "swap|ntfs|vfat" | sort | cut -d" " -f1 | grep -E -v "/loop|sr0|swap" | sed 's|/dev/||g')"
+echo $devs
+DEVS=`echo $devs | sed 's/ /!/g'`
+SETUP=`yad  --center --title="apt2sfs"  --text="  $LFONT \n Create module from downloaded package(s) by apt-get. \n <b>Note: These packages will not be registered by dpkg. </b> \n Depending on the sort of application(s) it may work or not. \n For example an application depending on startup at boot will not work. \n To start fresh, 'apt-get clean' will run before downloading. \n This will remove all deb packages in /var/cache/apt/archives. " \
+--window-icon="preferences-system" --form --columns=1 \
+--field="   Choose where to create new module, must be on linux filesystem, \n  ntfs or fat filesytems are excluded.  :LBL"  "" \
+--field=" :CB" "$DEVS" \
+--field="   Type packagename(s) separated by a space: :LBL" "" \
+--field=" : " "" \
+--field=" Run 'apt-get update' first (recommended):CHK" "TRUE" \
+ --button="gtk-quit:1" --button="gtk-ok:0"`
+ret=$?
+[[ $ret -ne 0 ]] && exit
+
+yad --on-top --title="apt2sfs" --text="  <span size='large' foreground='dark green'><b>*** Checking network connection... ***</b></span>  " --center --undecorated --no-buttons &
+pd=$!
+
+if (ping -w5 -c3 4.2.2.1) > /dev/null; then
+echo "Up"
+else
+kill $pd
+yad --text="  There is no network connection. " --title="apt2sfs" --button="gtk-close:0"
+exit 0
+fi
+kill $pd
+
+DRV="`echo $SETUP | cut -d "|" -f 2`"
+INSTALL="`echo $SETUP | cut -d "|" -f 4`"
+UPDATE="`echo $SETUP | cut -d "|" -f 5`"
+
+if [ -z "$DRV" ] || [ -z "$INSTALL" ]; then
+yad --center --title="apt2sfs" --text=" You probably did not fill in all fields, \n Please run again." --button="gtk-close:0"
+exit 0
+fi
+
+if [ "$UPDATE" = "TRUE" ]; then
+yad --on-top --title="apt2sfs" --text="  <span size='large' foreground='dark green'><b>*** Updating the repositories... ***</b></span>  " --center --undecorated --no-buttons &
+pd=$!
+apt-get update
+ret=$?
+kill $pd
+if [[ $ret -eq 100 ]]; then
+yad --title apt2sfs --text " There are one or more errors with updating. \n Check your /etc/apt/sources.list. \n         Still continue? \n        (not recommended) " --button="gtk-no:1" --button="gtk-yes:0"
+ret=$?
+[[ $ret -eq 1 ]] && exit 0
+fi
+fi
+
+SFS=$(for i in "$INSTALL"; do echo $(echo $i | sed 's| |_|g'); done)
+echo $SFS
+
+yad --on-top --title="apt2sfs" --text="  <span size='large' foreground='dark green'><b>*** Checking package(s)... ***</b></span>  " --center --undecorated --no-buttons &
+pd=$!
+export DEBIAN_FRONTEND=noninteractive
+apt-get install -s -y --force-yes $INSTALL -d
+ret=$?
+kill $pd
+if [[ $ret -eq 100 ]]; then
+apt-get install -s -y --force-yes $INSTALL -d 2>&1 | yad --width 400 --height 300 --title apt2sfs --wrap --tail --text " Sorry, there are one or more errors, see below. " --text-info --button="gtk-close:0"
+exit 0
+fi
+
+mkdir /mnt/$DRV 2> /dev/null
+mount /dev/$DRV /mnt/$DRV 2> /dev/null
+if [ -d "/mnt/$DRV/$SFS" ]; then
+yad --center --title="apt2sfs" --text=" Directory "/mnt/$DRV/$SFS" already exists, \n Please rename and run again. " --button="gtk-close:0"
+exit 0
+fi
+
+apt-get clean
+cmd="apt-get install -y --force-yes $INSTALL -d"
+(
+apt-get install -y --force-yes $INSTALL -d
+echo
+echo "This window will close in a few seconds..."
+) 2>&1 | yad --title=apt2sfs --text-info --text="  <span foreground='dark green'><b>Downloading deb package(s)...</b></span> " --height=300 --width=600 --wrap --tail --button="gtk-cancel:1" &
+
+pdapt="`ps -eo pid,cmd | grep -v grep | grep "$cmd" | awk '{ print $1 }'`"
+pdyad="`ps -eo pid,cmd | grep -v grep | grep "yad --title=apt2sfs" | awk '{ print $1 }'`"
+
+while ps -p $pdapt > /dev/null
+do sleep 1
+pdyad="`ps -eo pid,cmd | grep -v grep | grep "yad --title=apt2sfs" | awk '{ print $1 }'`"
+if [ -z $pdyad ]; then
+kill $pdapt
+exit 0
+fi
+done
+
+sleep 3
+kill $pdyad 2> /dev/null
+
+mkdir -p "/mnt/$DRV/$SFS" # Make new directory.
+
+yad --on-top --title="apt2sfs" --text="  <span size='large' foreground='dark green'><b>*** Extracting deb packages... ***</b></span>  " --center --undecorated --no-buttons &
+pd=$!
+cd /var/cache/apt/archives/ 
+for arg in *.deb ; do
+dpkg -x "$arg" "/mnt/$DRV/$SFS"
+done
+kill $pd
+
+cd "/mnt/$DRV/$SFS"
+
+zerosize() {
+  find $* | while read file; do
+    echo -n "."
+    rm -f $file
+    touch $file
+  done
+}
+
+    zerosize usr/share/doc -type f -size +1c
+    zerosize usr/share/doc -type l
+
+    zerosize usr/share/man -type f -size +1c
+    zerosize usr/share/man -type l
+
+
+    zerosize usr/share/info -type f -size +1c
+    zerosize usr/share/info -type l
+
+    zerosize usr/share/gnome/help -type f -size +1c
+    zerosize usr/share/gnome/help -type l
+
+    zerosize usr/share/gtk-doc -type f -size +1c
+    zerosize usr/share/gtk-doc -type l
+
+    chown -R man:root usr/share/man
+
+cd "/mnt/$DRV"
+
+xterm -T "apt2sfs" -si -sb -fg black -bg white -geometry 65x10 -e "mksquashfs "$SFS" "$SFS".squashfs -comp xz -b 512k"
+
+yad --title="apt2sfs" --center --text=" Done creating '/mnt/$DRV/$SFS.squashfs' \n Do you want to remove '/mnt/$DRV/$SFS'? " --button="gtk-yes:0" --button="gtk-no:1"
+ret=$?
+[[ $ret -eq 1 ]] && exit 0
+if [ -d "/mnt/$DRV/$SFS" ]; then
+rm -rf "/mnt/$DRV/$SFS"
+fi
+exit 0
+
+
+

@@ -1,0 +1,176 @@
+#!/bin/bash
+## by SNK - sklimkin 
+
+#if [ "`whoami`" != "root" ]; then
+#yad --title="SFS-Loader" --center --width="400" --text=" Sorry, you should be root to run this program. \n Open a terminal and type: sudo /opt/bin/user-modules_2 " --button="gtk-close:0"
+#exit 0
+#fi
+
+GTKDIALOG=gtkdialog
+
+#define combobox list items
+#stored value should be first in list
+COMBOBOX_ITEMS="<item>$I</item>"
+# find count of all installed modules
+COUNT=`losetup -a |awk -F"(" '! /.zzz\)/ {print $2}'|awk -F")" '{print $1}' | grep -c "/mnt"`
+
+# in cicle fill COMBOBOX_ITEMS with module-names - full path
+until [ "$COUNT" -eq 0 ]
+do
+#decrement-count
+let "COUNT = COUNT - 1"
+# get 2-nd part of loops for all NOT .zzz extension file-modules
+INSTALLED=`losetup /dev/loop$COUNT |awk -F"(" '! /.zzz\)/ {print $2}'|awk -F")" '{print $1}'`
+COMBOBOX_ITEMS=`echo "$COMBOBOX_ITEMS<item>$INSTALLED</item>"`
+done
+
+# if mod-list file missing (first run), then build this file
+[ ! -s ./mod-list ] && echo -e -n 'BOX1\n' > ./mod-list
+. ./mod-list
+##------------------------------------------------------------------------------##
+
+funccommand () {
+# This for load (else unload)
+if [ "$BOX1" != "" ]; then
+COMMAND1="-a"
+fi
+_dir=`dirname "$BOX1"`
+cd "${_dir}"
+FILENAME=`basename "$BOX1"`
+#in case no mod-list file (first run), build the file
+[ ! -s ./mod-list ] && echo -e -n 'COMBOBOX=COMBOBOX_ITEMS\nBOX1\n' > ./mod-list
+. ./mod-list
+# execute script for activate--deactivate
+if ! [ -d "/live/$FILENAME/" ]; then
+COMMAND1="-a"
+else COMMAND1="-d"
+fi
+# execute script for activate
+/opt/bin/loadmodule $COMMAND1 $FILENAME
+echo "$COMMAND1 $FILENAME"
+};
+
+funccommand2 () {
+# this for unload (else load) - !!! must be adjusted !!!
+if [ "$COMBOBOX" != "" ]; then
+COMMAND2="-d"
+else COMMAND2="-a"
+fi
+
+_dir2=`dirname "$COMBOBOX"`
+cd "${_dir2}"
+FILENAME2=`basename "$COMBOBOX"`
+
+# execute script for deactivate
+/opt/bin/loadmodule $COMMAND2 $FILENAME2
+echo "$COMMAND2 $FILENAME2"
+};
+##------------------------------------------------------------------------------##
+
+export ABOUT='
+<window title="About">
+		<text>
+			<variable>PROGRAM</variable>
+			<label>This program can mount-load & unmount-unload user-modules by gtkdialog and bash-script. Script from alphaOS, author - simargl. gtkdialog-script made by SNK (sklimkin).</label>
+		</text>
+			<action>echo PROGRAM= $PROGRAM</action>
+</window>
+'
+
+export HELP='
+<frame Help from gtkdialog. Edit-widget example:>
+	<edit>
+      <input file>tmp.text</input>
+      <width>400</width><height>350</height>
+      <default>"default text of the editor"</default>
+      <variable>HELP</variable>
+	</edit>
+</frame>
+'
+
+export MAIN_DIALOG='
+<window title="User-modules manager" resizable="false" width-request="380" height-request="160"  border-width="1">
+   <vbox spacing="3">
+   <vbox>
+		<menubar>
+		<menu label="About">
+            <menuitem stock-id="gtk-about">
+				<action>Launch:ABOUT</action>
+			</menuitem>
+            <menuitemseparator></menuitemseparator>
+            <menuitem stock-id="gtk-quit" accel-key="0x51" accel-mods="4">
+               <action>exit:Quit</action>
+            </menuitem>
+		</menu>
+		<menu>
+			<menuitem icon-name="terminal" label="top">
+				<action>xterm -e top</action>
+			</menuitem>
+			<menuitem icon-name="leafpad" label="leafpad">
+				<action>leafpad</action>
+			</menuitem>
+			<label>"Run Programs"</label>
+		</menu>
+		<menu label="Help (man pages)">
+			<menuitem label="man busybox">
+				<action>'"man busybox"'</action>
+				<action>Launch:HELP</action>
+			</menuitem>
+			<menuitem label="man squashfs">
+				<action>'"man squashfs"'</action>
+			</menuitem>
+		</menu>
+		</menubar>
+
+		<hbox>
+			<text>
+				<variable>FILE</variable>
+				<label>Pick module-file in DIR with modules</label>
+			</text>
+			<button><label>DONE</label>
+				<action>exit:Quit</action>
+			</button>
+		</hbox>
+
+		<vbox>
+			<hbox>
+				<entry accept="filename">
+					<variable>BOX1</variable>
+					<input>echo "select a module-file for LOAD"</input>
+				</entry>
+				<button>
+					<input file icon="gtk-open"></input>
+					<action type="fileselect">BOX1</action>
+					<action>save:BOX1</action>
+					<action>'"$0 func"'</action>
+				</button>
+			</hbox>
+			<hbox>
+				<combobox width-request="305">
+					<variable>COMBOBOX</variable>
+					'$COMBOBOX_ITEMS'
+					<action>save:COMBOBOX</action>
+				</combobox>
+				<button>
+					<label>UNLOAD</label>
+					<action>'"$0 func2"'</action>
+				</button>
+			</hbox>
+		</vbox>
+
+		<statusbar has-resize-grip="false">
+			<variable>StatBar</variable>
+			<default>Select module (deb, sfs) for load or unload</default>
+		</statusbar>
+   </vbox>
+   </vbox>
+</window>
+'
+
+case $1 in
+	func) funccommand $2 ;;
+	func2) funccommand2 $2 ;;
+   -d | --dump) echo "$MAIN_DIALOG" ;;
+   *) $GTKDIALOG --program=MAIN_DIALOG > ./mod-list ;;
+esac 
+

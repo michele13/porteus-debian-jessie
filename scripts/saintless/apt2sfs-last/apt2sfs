@@ -1,0 +1,494 @@
+#!/bin/bash
+
+[ "`whoami`" != "root" ] && exec gsu ${0} "$@"
+
+# Function restore: Restore changes made in save directory after the installing.
+
+restore() {
+cd "$CHNGS"
+
+# Create /tmp/files if it's not done before, so it will list only existing files and no duplicates.
+if [ ! -f /tmp/files ]; then
+while IFS= read -r f; do
+    if [[ -e $f ]]; then
+echo $f >> /tmp/files
+    fi
+done < /tmp/instfiles
+sort -u /tmp/files -o /tmp/files
+fi
+
+# Remove all installed files listed in /tmp/files but exclude already existing in save folder .
+
+# All new files in save folder.
+ALLFILES=`cat /tmp/files 2> /dev/null | sort -u`
+
+# The final result of files to be removed from save folder.
+# The '$EXCL' variable was created earlier by finding all existing files in save folder. 
+ALL=$(comm -23 <(echo "$ALLFILES") <(echo "$EXCL"))
+
+# Remove the new created files during installing.
+echo "$ALL" | sort -u | grep -v "^\./tmp" | \
+while read CMD; do
+rm -fr "$CMD" 2> /dev/null
+rmdir $(dirname "$CMD" 2> /dev/null) 2> /dev/null
+done
+
+# Restore all dpkg stuff in /var/lib/dpkg/ back to how it was before running apt2sfs.
+[ -d "$CHNGS"/var/lib/dpkg/infoold ] && rm -fr "$CHNGS"/var/lib/dpkg/info && mv -f "$CHNGS"/var/lib/dpkg/infoold "$CHNGS"/var/lib/dpkg/info
+[ -d "$CHNGSEXIT" ] && [ -d "$CHNGSEXIT"/var/lib/dpkg/infoold ] && rm -fr "$CHNGSEXIT"/var/lib/dpkg/info && mv -f "$CHNGSEXIT"/var/lib/dpkg/infoold "$CHNGSEXIT"/var/lib/dpkg/info
+
+mv -f /var/lib/dpkg/statusold /var/lib/dpkg/status 2> /dev/null
+mv -f /var/lib/dpkg/availableold /var/lib/dpkg/available 2> /dev/null
+
+echo "*** dpkg important files are restored to previous state now ***"
+
+gtk-update-icon-cache --force /usr/share/icons/hicolor
+update-desktop-database /usr/share/applications 2> /dev/null
+glib-compile-schemas /usr/share/glib-2.0/schemas 2> /dev/null
+update-menus
+
+# Unmount all earlier mounted modules (live-boot only).
+if [ ! -f /mnt/live/tmp/modules ]; then
+    if grep -q /lib/live/mount /proc/mounts; then # live-boot v3
+cat /tmp/mnts |  while read mnt; do
+umount $mnt
+rmdir $mnt
+done
+    else # live-boot v2 (only when 'showmounts' parameter is not used)
+        if grep -qv showmounts /proc/cmdline; then
+        cat /tmp/mnts |  while read mnt; do
+        umount $mnt
+        rmdir $mnt
+        done
+        fi
+    fi
+fi
+
+# This will 'reset' registered space used.
+mount -o remount /
+}
+
+# Function: 'exitfn': 
+# In case the user interrupts the script, restore to as it was before.
+# Otherwise dpkg could be left in a broken state.
+exitfn () {
+    trap SIGINT              # Resore signal handling for SIGINT
+if [ -f /tmp/instfiles ]; then	
+if [ "$restore_done" = "" ]; then
+    
+    echo; echo 'Aarghh!! Interrupted! Will try to restore now.'
+   
+kill $pdapt 2> /dev/null
+sleep 3
+kill $pdnoti 2> /dev/null
+kill $pdyad 2> /dev/null
+kill $! 2> /dev/null
+
+yad --on-top --title="apt2sfs" --text=" <span size='large' background='dark red' foreground='yellow'><b> *** Aarghh!!  Interrupted!</b></span><span background='dark red' foreground='white'><b>    Will try to restore now... </b></span><span size='large' background='dark red' foreground='yellow'><b> *** </b></span>  " --center --undecorated --no-buttons &
+pd=$!
+yad --on-top --geometry=60+40+40 --title="apt2sfs" --text="  <span size='large' background='dark green' foreground='white'><b> *** Removing files... *** </b></span>  " --undecorated --no-buttons &
+pdd=$! 
+restore
+sleep 2
+kill $pdd 2> /dev/null
+sleep 2
+kill $pd 2> /dev/null
+yad --on-top --title="apt2sfs" --text="  <span size='large' background='dark green' foreground='white'><b> *** Restoring Done! *** </b></span>  " --center --undecorated --no-buttons --timeout 5
+fi
+
+if [ "$wrkdir_created" = "yes" ]; then
+kill $! 2> /dev/null
+  if [ -d "/mnt/$DRV/$SFS" ]; then
+yad --title="apt2sfs" --center --text=" Do you want to remove '/mnt/$DRV/$SFS'? \n Recommended to press 'Yes', as the process was interrupted. " --button="gtk-yes:0" --button="gtk-no:1"
+ret=$?
+	if [[ $ret -eq 0 ]]; then
+    		if [ -d "/mnt/$DRV/$SFS" ]; then
+    		rm -rf "/mnt/$DRV/$SFS"
+    		fi
+	fi
+  fi
+  if [ -f "/mnt/$DRV/$SFS.squashfs" ]; then
+yad --title="apt2sfs" --center --text=" Do you want to remove '/mnt/$DRV/$SFS.squashfs'? \n Recommended to press 'Yes', as the process was interrupted. " --button="gtk-yes:0" --button="gtk-no:1"
+ret=$?
+[[ $ret -ne 0 ]] && exit 0
+rm -f "/mnt/$DRV/$SFS.squashfs"
+  fi
+fi
+    exit                     #   then exit script.
+else
+kill $! 2> /dev/null
+exit
+fi
+}
+
+trap "exitfn" 1 2 15           # Set up SIGINT trap to call function 'exitfn'.
+
+if [ -z `which inotifywait` ]; then
+yad --image=gtk-info --button="gtk-quit:0" --title="Dependency check" --text=" Cannot continue without inotifywait. \n Please install the 'inotify-tools' package. \n With synaptic, or in terminal: \n apt-get install inotify-tools "
+exit 0
+fi
+
+# Message at start.
+   if [ ! -f $HOME/.config/apt2sfsnomsg ]; then
+MESSAGE=`yad  --center --title="Apt2sfs"  --text=" Installing package(s) with this script will 'act' like there is nothing installed in the save file/folder.  \n \n This way the module created has all required dependencies included. \n \n There's no need to run it with a clean savefile (in contrary with older apt2sfs) . " --image="dialog-information" --window-icon="dialog-information" \
+--form \
+--field=" Don't show this message again:CHK" "FALSE"`
+ret=$?
+[[ $ret -ne 0 ]] && exit 1
+ 
+NOMESSAGE="`echo $MESSAGE | cut -d "|" -f 1`"
+[ "$NOMESSAGE" = "TRUE" ] && touch $HOME/.config/apt2sfsnomsg
+   fi
+
+# Remove temp files possibly leftover from previous run.
+rm -f /tmp/instfiles /tmp/files /tmp/mnts
+
+# Gui at start.
+LFONT="<span size='large' foreground='dark blue'><b>          *** Setup apt2sfs ***</b></span>"
+devs="$(blkid -o list | grep /dev | grep -E -v "swap|ntfs|vfat|crypt" | sort | cut -d" " -f1 | grep -E -v "/loop|sr0|swap" | sed 's|/dev/||g')"
+echo $devs
+DEVS=`echo $devs | sed 's/ /!/g'`
+SETUP=`yad  --center --title="apt2sfs"  --text="  $LFONT \n Create module from temporary installed package(s) by apt-get. \n <b>Note: These packages will not be registered by dpkg. </b> \n Depending on the sort of application(s) it may work or not. \n For example an application depending on startup at boot will not work. \n The installed package(s) will be removed afterwards. \n Also <b>only</b> the .deb packages downloaded by this script are removed. " \
+--window-icon="preferences-system" --form --columns=1 \
+--field="   Choose where to create new module, must be on linux filesystem, \n  ntfs or fat filesytems are excluded.  :LBL"  "" \
+--field=" :CB" "$DEVS" \
+--field="   Type packagename(s) separated by a space: :LBL" "" \
+--field=" : " "" \
+--field=" Run 'apt-get update' first (recommended):CHK" "TRUE" \
+ --button="gtk-quit:1" --button="gtk-ok:0"`
+ret=$?
+[[ $ret -ne 0 ]] && exit
+
+yad --on-top --title="apt2sfs" --text="  <span size='large' background='dark green' foreground='white'><b> *** Checking network connection... *** </b></span>  " --center --undecorated --no-buttons &
+pd=$!
+if ping -c1 google.com 2>&1 | grep unknown; then
+sleep 3
+kill $pd 2> /dev/null 
+yad --text="  There is no network connection. " --title="apt2sfs" --button="gtk-close:0"
+exit 0
+fi
+sleep 3
+kill $pd 2> /dev/null
+
+
+DRV="`echo $SETUP | cut -d "|" -f 2`"
+INSTALL="`echo $SETUP | cut -d "|" -f 4`"
+UPDATE="`echo $SETUP | cut -d "|" -f 5`"
+
+if [ -z "$DRV" ] || [ -z "$INSTALL" ]; then
+yad --center --title="apt2sfs" --text=" You probably did not fill in all fields, \n Please run again." --button="gtk-close:0"
+exit 0
+fi
+
+if [ "$UPDATE" = "TRUE" ]; then
+yad --on-top --title="apt2sfs" --text="  <span size='large' background='dark green' foreground='white'><b> *** Updating the repositories... *** </b></span>  " --center --undecorated --no-buttons &
+pd=$!
+apt-get update
+ret=$?
+kill $pd
+if [[ $ret -eq 100 ]]; then
+yad --title apt2sfs --text " There are one or more errors with updating. \n Check your /etc/apt/sources.list. \n         Still continue? \n        (not recommended) " --button="gtk-no:1" --button="gtk-yes:0"
+ret=$?
+[[ $ret -eq 1 ]] && exit 0
+fi
+fi
+
+SFS=$(for i in "$INSTALL"; do echo $(echo $i | sed 's| |_|g'); done)
+echo $SFS
+
+# Set variable for available and status file from the main module and for the save directory.
+if [ -f /mnt/live/tmp/modules ]; then # For porteus-boot
+NUM=$(find $(ls -d -1 /mnt/live/memory/images/*/var/lib/dpkg) \( ! -path "/mnt/live/memory/images/changes-exit/*" \)  -type f -name 'status' | wc -l)
+if [ $NUM -gt 1 ]; then
+ALL=$(find $(ls -d -1 /mnt/live/memory/images/*/var/lib/dpkg) \( ! -path "/mnt/live/memory/images/changes-exit/*" \)  -type f -name 'status')
+else
+AVAIL=$(find $(ls -d -1 /mnt/live/memory/images/*/var/lib/dpkg) \( ! -path "/mnt/live/memory/images/changes-exit/*" \)  -type f -name 'available' | head -1)
+STAT=$(find $(ls -d -1 /mnt/live/memory/images/*/var/lib/dpkg) \( ! -path "/mnt/live/memory/images/changes-exit/*" \)  -type f -name 'status' | head -1)
+fi
+CHNGS=/mnt/live/memory/changes
+
+else # For live-boot
+# First find out if we are possibly using live-boot v3
+	if grep -q /lib/live/mount /proc/mounts; then # If true we are using live-boot v3 and go on
+# Mount all loaded modules at boot in /live
+# For compatibility with other scripts using '/live/*' as mountpoint we will mount modules the same
+LOOP=$(blkid -o list -c /dev/null | grep -P "/lib/live/mount/rootfs" | awk '{print $1}')
+for i in  $LOOP; do
+cat /proc/mounts | grep ' squashfs ' | while read line; do
+LOOP=`echo ${line} | awk '{ print $1}'`
+MOD=`basename $(echo ${line} | awk '{ print $2}')`
+if [ $LOOP = $i ]; then
+mkdir /live/$MOD
+echo /live/$MOD >> /tmp/mnts # Store mountpoints in /tmp/mnts for unmounting later
+mount -o loop $LOOP /live/$MOD 2> /dev/null
+fi
+done
+done
+
+	else # For live-boot v2
+# Mount all loaded modules at boot in /live
+  if grep -qv showmounts /proc/cmdline; then
+LOOP=$(blkid -o list -c /dev/null | grep -P "squashfs" | grep "(in use)" | awk '{print $1}')
+		for i in $LOOP; do
+cat /proc/mounts | grep ' squashfs ' | while read line; do
+        LOOP=`echo ${line} | awk '{ print $1}'`
+        MOD=`basename $(echo ${line} | awk '{ print $2}')`
+    if [ $LOOP = $i ]; then
+	mkdir /live/$MOD
+	echo /live/$MOD >> /tmp/mnts # Store mountpoints in /tmp/mnts for unmounting later
+        mount -o loop $LOOP /live/$MOD 2> /dev/null
+    fi    
+done
+		done
+  fi
+	fi
+NUM=$(find $(ls -d -1 /live/*/var/lib/dpkg) \( ! -path "/live/cow/*" \) \( ! -path "/live/image/*" \)  -type f -name 'status' | wc -l)
+if [ $NUM -gt 1 ]; then
+ALL=$(find $(ls -d -1 /live/*/var/lib/dpkg) \( ! -path "/live/cow/*" \) \( ! -path "/live/image/*" \)  -type f -name 'status')
+else
+AVAIL=$(find $(ls -d -1 /live/*/var/lib/dpkg) \( ! -path "/live/cow/*" \) \( ! -path "/live/image/*" \)  -type f -name 'available' | head -1)
+STAT=$(find $(ls -d -1 /live/*/var/lib/dpkg) \( ! -path "/live/cow/*" \) \( ! -path "/live/image/*" \)  -type f -name 'status' | head -1)
+fi
+CHNGS=/live/cow
+fi
+
+yad --on-top --title="apt2sfs" --text="  <span size='large' background='dark green' foreground='white'><b> *** Checking package(s)... *** </b></span>  " --center --undecorated --no-buttons &
+pd=$!
+
+# Do a simulation of the installing to check if everything is ok.
+export DEBIAN_FRONTEND=noninteractive
+apt-get install -s -y --force-yes $INSTALL &> /dev/null
+ret=$?
+kill $pd
+if [[ $ret -eq 100 ]]; then # If not ok
+apt-get install -s -y --force-yes $INSTALL 2>&1 | yad --width 400 --height 300 --title apt2sfs --wrap --tail --text " Sorry, there are one or more errors, see below. \n Will restore back to previous state now..." --text-info --button="gtk-close:0" &
+yad --on-top --title="apt2sfs" --text="  <span size='large' background='dark green' foreground='white'><b> *** Restoring... *** </b></span>  " --center --undecorated --no-buttons &
+pd=$!
+restore
+sleep 3
+kill $pd 2> /dev/null
+exit
+fi
+
+# Make directory and mount the chosen drive.
+mkdir /mnt/$DRV 2> /dev/null
+mount /dev/$DRV /mnt/$DRV 2> /dev/null
+
+# Check for existing directory.
+if [ -d "/mnt/$DRV/$SFS" ]; then
+yad --center --title="apt2sfs" --text=" Directory "/mnt/$DRV/$SFS" already exists, \n Please rename and run again. " --button="gtk-close:0"
+exit 0
+fi
+
+# Check if module already exists.
+if [ -f "/mnt/$DRV/$SFS.squashfs" ]; then
+yad --center --title="apt2sfs" --text=" Module: "/mnt/$DRV/$SFS.squashfs" already exists, \n Please rename and run again. " --button="gtk-close:0"
+exit 0
+fi
+
+# Copy status and available from one of the main (mounted) module(s), this wil 'fool' dpkg.
+# This way dpkg 'knows' only about what's installed in the main module, not what's in savefile.
+if [ $NUM -gt 1 ]; then # If there are more than one status files found.
+ALL=$(echo $ALL | tr '\n' ' ')
+
+DPKGCHOICE=$(yad --separator=" " --center --height 300 --width="620" --list --title="Choose dpkg base" --text=" There are more then one dpkg registration 'status' files found in the loaded modules. \n The 'status' file lists all packages installed. \n Please choose the one you wish to use as base (starting point). \n For example in case: You have the last module in this list loaded at boot everytime. \n It's then recommended to use that. " --column " Select one of the items " $ALL --no-headers --button="gtk-cancel:1" --button="gtk-ok:0")
+ret=$?
+[[ $ret -eq 1 ]] && exit 0
+echo "$DPKGCHOICE"
+DPKGDIR=$(dirname "$DPKGCHOICE")
+AVAIL="$DPKGDIR"/available
+STAT="$DPKGDIR"/status
+yad --on-top --title="apt2sfs" --text="  <span background='dark green' foreground='white'><b> *** Copying 'status' and 'available' files from $DPKGDIR *** </b></span>  " --center --undecorated --no-buttons --timeout 4
+fi
+
+# Backup stuff in $CHNGS/var/lib/dpkg and $CHNGSEXIT/var/lib/dpkg (if exists) before installing to be restored later to previous state.
+[ -d "$CHNGS"/var/lib/dpkg/info ] && cp -a "$CHNGS"/var/lib/dpkg/info "$CHNGS"/var/lib/dpkg/infoold && find "$CHNGS"/var/lib/dpkg/info -name '.wh.*' -delete
+
+if [ -f /mnt/live/tmp/changes-exit ]; then
+CHNGSEXIT="/mnt/live/memory/images/changes-exit"
+[ -d "$CHNGSEXIT"/var/lib/dpkg/info ] && cp -a "$CHNGSEXIT"/var/lib/dpkg/info "$CHNGSEXIT"/var/lib/dpkg/infoold && find "$CHNGSEXIT"/var/lib/dpkg/info -name '.wh.*' -delete
+fi
+
+# Backup status and available
+cp -a /var/lib/dpkg/status /var/lib/dpkg/statusold
+cp -a /var/lib/dpkg/available /var/lib/dpkg/availableold
+
+cp -a "$AVAIL" /var/lib/dpkg/available
+cp -a "$STAT" /var/lib/dpkg/status
+
+cd "$CHNGS"
+# Find files to be excluded later when removing.
+EXCL=$(find . | sort -u)
+
+# Watch save directory for new created files and list them in /tmp/instfiles.
+# And increase limitation 'max_user_watches'
+echo 1000000 > /proc/sys/fs/inotify/max_user_watches # 1 million should be enough :)
+inotifywait -mr . -e create -e moved_to |
+    while read path action file; do
+        #echo "The file '$file' appeared in directory '$path' via '$action'"
+        echo "${path}${file}" >> /tmp/instfiles
+    done &
+
+# Install the packages.
+cmd="apt-get install -y --force-yes $INSTALL"
+(
+apt-get install -y --force-yes $INSTALL | tee /tmp/aptout
+echo
+echo "This window will close in a few seconds..."
+) 2>&1 | yad --title=apt2sfs --text-info --text="  <span foreground='dark green'><b>Installing package(s)...</b></span> " --height=300 --width=600 --wrap --tail --button="gtk-cancel:1" &
+
+pdnoti="`ps -eo pid,cmd | grep -v grep | grep "inotifywait -mr . -e create -e moved_to" | awk '{ print $1 }'`"
+pdapt="`ps -eo pid,cmd | grep -v grep | grep "$cmd" | awk '{ print $1 }'`"
+pdyad="`ps -eo pid,cmd | grep -v grep | grep "yad --title=apt2sfs" | awk '{ print $1 }'`"
+
+while ps -p $pdapt > /dev/null
+do sleep 1
+pdyad="`ps -eo pid,cmd | grep -v grep | grep "yad --title=apt2sfs" | awk '{ print $1 }'`"
+if [ -z $pdyad ]; then
+# When interrupted show message and try to restore.
+    echo; echo 'Aarghh!! Interrupted! Will try to restore now.'
+    kill $pdapt 2> /dev/null
+sleep 3
+kill $pdnoti 2> /dev/null
+
+yad --on-top --title="apt2sfs" --text=" <span size='large' background='dark red' foreground='yellow'><b> *** Aarghh!!  Interrupted!</b></span><span background='dark red' foreground='white'><b>    Will try to restore now... </b></span><span size='large' background='dark red' foreground='yellow'><b> *** </b></span>  " --center --undecorated --no-buttons &
+pd=$!
+yad --on-top --geometry=160+160+160 --title="apt2sfs" --text="  <span size='large' background='dark green' foreground='white'><b> *** Removing files... *** </b></span>  " --undecorated --no-buttons &
+pdd=$! 
+restore
+sleep 2
+kill $pdd 2> /dev/null
+sleep 2
+kill $pd 2> /dev/null
+yad --on-top --title="apt2sfs" --text="  <span size='large' background='dark green' foreground='white'><b> *** Restoring Done! *** </b></span>  " --center --undecorated --no-buttons --timeout 5
+exit 0
+fi
+done
+
+sleep 3
+kill $pdyad 2> /dev/null
+kill $pdnoti 2> /dev/null
+
+CNT=`wc -l < /tmp/aptout`
+TEXT=`cat /tmp/aptout`
+if [ "$CNT" -lt 8 ]; then
+yad --width=600 --center --title="apt2sfs" --text=" Nothing has been installed or something unexpected occurred, apt-get output: \n \n <b>$TEXT</b> \n \n Will restore back to previous state now... " --button="gtk-close:0" &
+yad --on-top --title="apt2sfs" --text="  <span size='large' background='dark green' foreground='white'><b> *** Restoring... *** </b></span>  " --center --undecorated --no-buttons &
+pd=$!
+restore
+sleep 3
+kill $pd 2> /dev/null
+exit
+fi
+
+mkdir -p "/mnt/$DRV/$SFS" # Make new directory.
+wrkdir_created=yes
+
+cd "$CHNGS"
+
+# Check for all existing files listed in /tmp/instfiles and create new list.
+while IFS= read -r f; do
+    if [[ -e $f ]]; then
+echo $f >> /tmp/files
+    fi
+done < /tmp/instfiles
+sort -u /tmp/files -o /tmp/files
+
+# Copy files, show progress bar.
+running(){ ps $1 | grep $1 >/dev/null; }
+
+TOTAL=$(cat /tmp/files | grep -v '^\./var/cache*\|^\./var/lib/dpkg*\|^\./var/log*\|^\./tmp\|^\./mnt\|^\./media\|^\./live\|^\./root\|^\./opt\|.wh.' | tr '\n' '\0' | du --files0-from=- -cbs --apparent-size 2> /dev/null | awk 'END {print $1}')
+echo total=$TOTAL
+
+echo "Copying files to /mnt/$DRV/$SFS..."
+
+cat /tmp/files | grep -v '^\./var/cache*\|^\./var/lib/dpkg*\|^\./var/log*\|^\./tmp\|^\./mnt\|^\./media\|^\./live\|^\./root\|^\./opt\|.wh.' | \
+while read CMD; do
+cp -a --parents "$CMD" "/mnt/$DRV/$SFS" 2> /dev/null
+done &
+
+CPPID=$!
+
+# trap "kill $CPPID" 2 15
+
+(
+   while running $CPPID; do
+    
+     COPY=$(du -cbs --apparent-size "/mnt/$DRV/$SFS"/* 2> /dev/null | awk 'END {print $1}')
+       
+     PERC=$((COPY*100/TOTAL))
+     echo $PERC
+     sleep 1
+   done   
+    echo 100
+sleep 1  
+) | yad --title="Apt2sfs" --center --height="100" --width="450" --progress --no-buttons --auto-close --text=" Copying files to "/mnt/$DRV/$SFS"... "
+
+
+# Execute the 'restore' function (on top of script)
+yad --on-top --title="apt2sfs" --text="  <span size='large' background='dark green' foreground='white'><b> *** Removing installed files... *** </b></span>  " --center --undecorated --no-buttons &
+pd=$!
+restore
+restore_done=yes
+
+kill $pd 2> /dev/null
+
+cd "/mnt/$DRV/$SFS"
+
+echo "Cleaning..."
+rm -f "/mnt/$DRV/$SFS"/etc/menu.old 
+rm -f "/mnt/$DRV/$SFS"/var/lib/alsa/asound.state
+rm -f "/mnt/$DRV/$SFS"/root/.bash_history
+rm -f "/mnt/$DRV/$SFS"/root/.xsession-errors
+rm -rf "/mnt/$DRV/$SFS"/root/.cache
+rm -rf "/mnt/$DRV/$SFS"/root/.thumbnails
+rm -f "/mnt/$DRV/$SFS"/etc/blkid-cache
+rm -f "/mnt/$DRV/$SFS"/etc/resolv.conf
+rm -rf "/mnt/$DRV/$SFS"/etc/udev/rules.d/70-persistent*
+
+rm -rf "/mnt/$DRV/$SFS"/var/lib/apt
+
+zerosize() {
+  find $* | while read file; do
+    echo -n "."
+    rm -f $file
+    touch $file
+  done
+}
+
+    zerosize usr/share/doc -type f -size +1c
+    zerosize usr/share/doc -type l
+
+    zerosize usr/share/man -type f -size +1c
+    zerosize usr/share/man -type l
+
+
+    zerosize usr/share/info -type f -size +1c
+    zerosize usr/share/info -type l
+
+    zerosize usr/share/gnome/help -type f -size +1c
+    zerosize usr/share/gnome/help -type l
+
+    zerosize usr/share/gtk-doc -type f -size +1c
+    zerosize usr/share/gtk-doc -type l
+
+    chown -R man:root usr/share/man
+
+find . -maxdepth 1 -xtype l -delete
+
+cd "/mnt/$DRV"
+yad --on-top --title="apt2sfs" --text="  <span size='large' background='dark green' foreground='white'><b> *** Creating "$SFS".squashfs... *** </b></span>  " --center --undecorated --no-buttons --timeout 4 &
+
+# Create module.
+xterm -T "apt2sfs" -si -sb -fg black -bg white -geometry 65x10 -e "mksquashfs "$SFS" "$SFS".squashfs -comp xz -b 1M -Xbcj x86"
+
+# Remove working directory?
+yad --title="apt2sfs" --center --text=" Done creating '/mnt/$DRV/$SFS.squashfs' \n Do you want to remove '/mnt/$DRV/$SFS'? " --button="gtk-yes:0" --button="gtk-no:1"
+ret=$?
+[[ $ret -ne 0 ]] && exit 0
+if [[ -n "$SFS" && -n "$DRV" ]]; then
+rm -rf "/mnt/$DRV/$SFS"
+fi
+exit 0
+
+

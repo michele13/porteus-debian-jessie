@@ -1,0 +1,38 @@
+#!/bin/bash
+
+post_actions_check_if_needed()
+{
+  ICONS=$(ls /usr/share/icons/hicolor 2>/dev/null)
+  DESKTOP=$(ls /usr/share/applications 2>/dev/null)
+  GSETTINGS=$(ls /usr/share/glib-2.0/schemas 2>/dev/null)
+  FONTS=$(ls /usr/share/fonts/TTF 2>/dev/null)
+}
+
+post_actions_run_list()
+{
+  if [ "$ICONS" ]; then 
+
+    gtk-update-icon-cache --force /usr/share/icons/hicolor &>/dev/null 2>&1
+  fi
+  if [ "$DESKTOP" ]; then
+
+    update-desktop-database &>/dev/null 2>&1
+    rm -r $HOME/.cache &>/dev/null 2>&1
+  fi
+  if [ "$GSETTINGS" ]; then
+
+    glib-compile-schemas /usr/share/glib-2.0/schemas &>/dev/null 2>&1
+  fi
+  if [ "$FONTS" ]; then
+
+    fc-cache -f -s > /dev/null
+    mkfontscale /usr/share/fonts/TTF
+    mkfontdir /usr/share/fonts/TTF
+  fi
+}
+
+post_actions_check_if_needed
+sleep 1
+post_actions_run_list
+
+exit

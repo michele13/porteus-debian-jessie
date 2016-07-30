@@ -1,0 +1,30 @@
+
+apt2sfs is a gui application using yad as frontend to create a module from downloaded files by apt-get.
+To use it choose a drive for the working directory to be created and type name(s) of package(s).
+The package(s) will be downloaded only (not installed!) along with the dependencies.
+The deb packages will be extracted in a directory named after the chosen packages before squashfs module is created.
+This means that the packages are NOT regularly installed and therefore are not registered by dpkg.
+This has advantages and disadvantages
+Advantages:
+- dpkg cannot be broken because it knows nothing at all about these packages.
+- the module can be loaded on the fly, almost without making any changes to the base system.
+  (except for possibly leaving behind some files in $HOME/.config)
+
+Disadvantages:
+- Some applications may not work because e.g. depending on startup at boot or special postinstall script to run.
+- Dependencies may not be all satisfied, therefore it is recommended to create the module with an empty save file so that apt "knows" about what dependencies are required from a basic DebianDog.(this will result to get larger size of module but gives more guarantee to work as expected). 
+-----------------------------
+loadmodule is a script that will load the module "on the fly"
+This incuded loadmodule is for DebianDog (live-rw boot method).
+For Porteus-Wheezy you can use the right-click option in Thunar ((de)activate module)
+Note that a module can be acivated only from an "actual" mounted storage like /mnt/sda1 (so activating from e.g. /root or /tmp doesn't work).
+ 
+Usage:
+loadmodule -a /path/to/module.squashfs # will activate module
+NOTE: A restart of X is needed to e.g. show application in menu.
+
+loadmodule -d /path/to/module.squashfs # will deactivate module.
+
+Update from previous loadmodule script (as also used in Sergey's sfs load application)
+- Now full path of module can be used.
+- Improved error checking (and yad messages)
